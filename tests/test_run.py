@@ -6,6 +6,13 @@ from scraper import run
 from scraper.models import Review
 
 
+class _NullChrome:
+    name = "chrome"
+
+    def close(self):
+        return None
+
+
 class _NullPool:
     def stats(self):
         return {}
@@ -47,4 +54,60 @@ def test_dry_run_writes_json_and_touches_no_sheet(tmp_path, monkeypatch, capsys)
 
 def test_requires_at_least_one_platform_target(capsys):
     assert run.main(["--company", "Trademax"]) == 2
-    assert "at least one of" in capsys.readouterr().err.lower()
+    assert "at least one of --trustpilot" in capsys.readouterr().err.lower()
+
+
+def test_both_platforms_write_into_one_tab(tmp_path, monkeypatch):
+    output = tmp_path / "out.json"
+
+    class FakeTrustpilot:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, domain, target=None, on_view=None):
+            return run.CollectResult(
+                reviews=[Review(review_id="trustpilot:a", platform="Trustpilot")],
+                stats={"unique_reviews": 1})
+
+    class FakeGoogle:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, query, company_name, max_scrolls=80):
+            return run.CollectResult(
+                reviews=[Review(review_id="google:b", platform="Google")],
+                stats={"unique_reviews": 1})
+
+    monkeypatch.setattr(run, "TrustpilotAdapter", FakeTrustpilot)
+    monkeypatch.setattr(run, "GoogleMapsAdapter", FakeGoogle)
+    monkeypatch.setattr(run, "build_pool", lambda **kwargs: _NullPool())
+    monkeypatch.setattr(run, "ChromeCDPFetcher", lambda **kwargs: _NullChrome())
+
+    exit_code = run.main(["--company", "Trademax",
+                          "--trustpilot", "www.trademax.se",
+                          "--google", "Trademax Stockholm",
+                          "--dry-run", "--output", str(output),
+                          "--checkpoint-dir", str(tmp_path)])
+
+    assert exit_code == 0
+    platforms = {row["platform"] for row in json.loads(output.read_text())}
+    assert platforms == {"Trustpilot", "Google"}
+
+
+def test_google_only_run_needs_no_trustpilot_domain(tmp_path, monkeypatch):
+    class FakeGoogle:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, query, company_name, max_scrolls=80):
+            return run.CollectResult(
+                reviews=[Review(review_id="google:b", platform="Google")],
+                stats={})
+
+    monkeypatch.setattr(run, "GoogleMapsAdapter", FakeGoogle)
+    monkeypatch.setattr(run, "build_pool", lambda **kwargs: _NullPool())
+    monkeypatch.setattr(run, "ChromeCDPFetcher", lambda **kwargs: _NullChrome())
+
+    assert run.main(["--company", "T", "--google", "T Stockholm", "--dry-run",
+                     "--output", str(tmp_path / "o.json"),
+                     "--checkpoint-dir", str(tmp_path)]) == 0
