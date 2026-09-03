@@ -13,6 +13,12 @@ from scraper.platforms.trustpilot.planner import View, plan_views
 
 LISTING_URL = "https://www.trustpilot.com/review/{domain}{query}"
 
+# Views overlap, so collecting N unique reviews needs more than N planned rows.
+# Measured on a real 3000-target run: 152 pages yielded 2173 unique and 756
+# duplicates. Planning with headroom costs nothing when it is not needed —
+# harvesting stops the moment the true target is reached.
+OVERLAP_HEADROOM = 1.8
+
 
 def _utc_now() -> str:
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -50,12 +56,16 @@ class TrustpilotAdapter:
                 on_view: Optional[Callable[[str, List[Review]], None]] = None) -> CollectResult:
         counts: Counter = Counter()
         page_one_cache: Dict[str, str] = {}
+        probed: Dict[str, Optional[int]] = {}
         languages: List[Dict[str, object]] = []
         topics: List[str] = []
 
         def probe(view: View) -> Optional[int]:
-            """Fetch page 1 of a view for its totalCount. The HTML is cached so
-            harvesting never re-fetches page 1."""
+            """Fetch page 1 of a view for its totalCount. Memoised, and the HTML
+            is cached so harvesting never re-fetches page 1."""
+            if view.label() in probed:
+                return probed[view.label()]
+            probed[view.label()] = None
             result = self.pool.fetch(self._url(domain, view, 1))
             counts["pages_fetched"] += 1
             counts[result.outcome.value] += 1
@@ -70,9 +80,20 @@ class TrustpilotAdapter:
             if not topics:
                 topics.extend(parser.parse_topics(props))
             pagination = parser.parse_pagination(props)
-            return pagination["total"] if pagination else None
+            total = pagination["total"] if pagination else None
+            probed[view.label()] = total
+            return total
 
-        planned = plan_views(probe, languages=languages, topics=topics, target=target)
+        probe(View.of(languages="all"))
+        if languages and not topics:
+            # Topic ids ride only on the dominant language's page — never on
+            # languages=all — so ask there before planning.
+            richest = max(languages, key=lambda lang: lang.get("count") or 0)
+            probe(View.of(languages=richest["code"]))
+
+        headroom = int(target * OVERLAP_HEADROOM) if target else None
+        planned = plan_views(probe, languages=languages, topics=topics,
+                             target=headroom)
         counts["views_planned"] = len(planned)
 
         seen = set()

@@ -112,3 +112,31 @@ def test_no_request_ever_carries_page_one():
     fetcher = RecordingFetcher()
     adapter_with(fetcher).collect("www.trademax.se")
     assert not any("page=1&" in url or url.endswith("page=1") for url in fetcher.urls)
+
+
+NO_TOPICS = GOOD.replace(
+    '"topicSummaryLocalizedTopics":[{"id":"product","displayName":"Product"},'
+    '{"id":"delivery_service","displayName":"Delivery service"},'
+    '{"id":"quality","displayName":"Quality"}],', "")
+
+
+def test_planning_probes_the_richest_language_to_discover_topics():
+    """Topic ids are published only on the dominant language's page, never on
+    languages=all, so they must be fetched from there or the topic dimension
+    silently never engages — which is exactly why a 3000-target run came back
+    with 2173."""
+    assert "topicSummaryLocalizedTopics" not in NO_TOPICS
+
+    def responder(url):
+        return NO_TOPICS if url.endswith("?languages=all") else GOOD
+
+    fetcher = RecordingFetcher(responder=responder)
+    adapter_with(fetcher).collect("www.trademax.se", target=50)
+    assert any(url.endswith("?languages=sv") for url in fetcher.urls), fetcher.urls
+
+
+def test_each_view_is_probed_at_most_once():
+    fetcher = RecordingFetcher()
+    adapter_with(fetcher).collect("www.trademax.se", target=50)
+    root = [url for url in fetcher.urls if url.endswith("?languages=all")]
+    assert len(root) == 1, root
