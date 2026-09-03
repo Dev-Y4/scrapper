@@ -1,3 +1,13 @@
+# --- secrets: broad rules first, exceptions below ---
+*.json
+!www_trademax_se_reviews.json
+!www_trademax_se_reviews_INPROGRESS.json
+!www_trademax_se_selenium_reviews.json
+!tests/fixtures/*.json
+!package.json
+.venv/
+checkpoints/
+
 .venv/
 _pycache_/
 *.pyc
