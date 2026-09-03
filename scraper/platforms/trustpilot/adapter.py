@@ -33,13 +33,21 @@ class TrustpilotAdapter:
 
     # -- url ------------------------------------------------------------
     def _url(self, domain: str, view: View, page: int) -> str:
+        """Page 1 is requested WITHOUT a page parameter on purpose.
+
+        Trustpilot canonicalises an explicit `page=1` to the unfiltered default
+        view and silently drops every filter, regardless of parameter order, so
+        including it would collapse all filter slicing into a single view."""
         query = view.query()
+        base = LISTING_URL.format(domain=domain, query=query)
+        if page <= 1:
+            return base
         separator = "&" if query else "?"
-        return LISTING_URL.format(domain=domain, query=query) + \
-            "{0}page={1}".format(separator, page)
+        return base + "{0}page={1}".format(separator, page)
 
     # -- collection ------------------------------------------------------
-    def collect(self, domain: str, target: Optional[int] = None) -> CollectResult:
+    def collect(self, domain: str, target: Optional[int] = None,
+                on_view: Optional[Callable[[str, List[Review]], None]] = None) -> CollectResult:
         counts: Counter = Counter()
         page_one_cache: Dict[str, str] = {}
         languages: List[Dict[str, object]] = []
@@ -103,6 +111,8 @@ class TrustpilotAdapter:
                     view_reviews.append(review)
 
             reviews.extend(view_reviews)
+            if on_view is not None:
+                on_view(label, view_reviews)
 
             if target is not None and len(reviews) >= target:
                 break

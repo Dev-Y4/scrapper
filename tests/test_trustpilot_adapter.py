@@ -4,6 +4,7 @@ from pathlib import Path
 
 from scraper.fetchers.pool import FetcherPool
 from scraper.platforms.trustpilot.adapter import TrustpilotAdapter
+from scraper.platforms.trustpilot.planner import View
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOOD = (FIXTURES / "trustpilot_page.html").read_text(encoding="utf-8")
@@ -83,3 +84,31 @@ def test_target_limits_the_work():
     fetcher = RecordingFetcher()
     result = adapter_with(fetcher).collect("www.trademax.se", target=20)
     assert result.stats["views_planned"] >= 1
+
+
+def test_on_view_callback_fires_per_view_for_checkpointing():
+    seen = []
+    adapter = adapter_with(RecordingFetcher())
+    adapter.collect("www.trademax.se",
+                    on_view=lambda label, reviews: seen.append((label, len(reviews))))
+    assert seen
+    assert all(isinstance(label, str) for label, _ in seen)
+
+
+def test_page_one_url_omits_the_page_param():
+    """Trustpilot canonicalises `page=1` to the unfiltered default view and
+    silently drops every filter. Page 1 of a view must be requested without it,
+    or all filter slicing collapses to one view."""
+    adapter = adapter_with(RecordingFetcher())
+    view = View.of(languages="sv").with_("stars", 1)
+
+    assert adapter._url("www.trademax.se", view, 1) == (
+        "https://www.trustpilot.com/review/www.trademax.se?languages=sv&stars=1")
+    assert adapter._url("www.trademax.se", view, 2) == (
+        "https://www.trustpilot.com/review/www.trademax.se?languages=sv&stars=1&page=2")
+
+
+def test_no_request_ever_carries_page_one():
+    fetcher = RecordingFetcher()
+    adapter_with(fetcher).collect("www.trademax.se")
+    assert not any("page=1&" in url or url.endswith("page=1") for url in fetcher.urls)
