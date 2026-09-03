@@ -369,6 +369,17 @@ ignored.
 ## 9. Future work
 
 - LLM enrichment of the three blank columns.
+- **Company-website reviews** — revisit only if a real client's competitor set
+  turns out to be widget-heavy (Yotpo / Judge.me / Reviews.io / Lipscore etc.).
+  Probed trademax.se: 760KB of homepage HTML, no widget vendor detected and no
+  JSON-LD `AggregateRating`. One adapter behind the existing seam if it ever
+  earns its place.
+- **Untapped Trustpilot dimensions**: `topics`, `search`, `locationId`,
+  `verified`, `replies` — each opens further 200-review windows if yield ever
+  falls short of a target.
+- **Google multi-location**: chains list each showroom as its own place with its
+  own reviews. Measuring that multiplier is the first thing to try if a company's
+  yield disappoints.
 - Discovery step: Tavily / DDGS to build competitor target lists. Right tool for
   finding review-page URLs, wrong tool for extracting review bodies.
 - Paid unblocker as a third fetcher, if the company funds it. Note it raises
