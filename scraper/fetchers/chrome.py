@@ -79,6 +79,11 @@ class ChromeCDPFetcher(Fetcher):
         self._page.set_default_timeout(45000)
         return self._page
 
+    def page(self):
+        """The live Playwright page. Adapters that must interact with a page
+        (scroll, click) use this instead of fetch()."""
+        return self._ensure_page()
+
     # -- fetching --------------------------------------------------------
     def fetch(self, url: str) -> str:
         page = self._ensure_page()
