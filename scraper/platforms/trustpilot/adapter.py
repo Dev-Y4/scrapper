@@ -13,11 +13,12 @@ from scraper.platforms.trustpilot.planner import View, plan_views
 
 LISTING_URL = "https://www.trustpilot.com/review/{domain}{query}"
 
-# Views overlap, so collecting N unique reviews needs more than N planned rows.
-# Measured on a real 3000-target run: 152 pages yielded 2173 unique and 756
-# duplicates. Planning with headroom costs nothing when it is not needed —
-# harvesting stops the moment the true target is reached.
-OVERLAP_HEADROOM = 1.8
+# Views overlap, so collecting N unique reviews needs far more than N planned
+# rows. Measured across three real 3000-target runs: language x star slices are
+# disjoint and yield ~2170, while topic slices run 1-167 rows each against the
+# 200 the planner assumes. Planning surplus costs nothing when it is not needed
+# — harvesting stops the moment the true target is reached.
+OVERLAP_HEADROOM = 3.0
 
 
 def _utc_now() -> str:

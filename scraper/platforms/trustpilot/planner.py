@@ -147,8 +147,10 @@ def plan_views(probe: Callable[[View], Optional[int]], *,
             for cell in at_cap:
                 planned.append(PlannedView(cell.view.with_("topics", topic),
                                            pages_for(VIEW_CAP), VIEW_CAP))
-            if not _short_of(planned, target):
-                break
+        # Every topic is planned rather than stopping at the estimate: real
+        # topic cells hold far less than the 200 assumed here (measured 1-167),
+        # so an estimate-based stop leaves the target unreachable. Harvesting
+        # ends the moment the true target is met, so surplus plans cost nothing.
 
     planned.extend(star_views)   # cross-language recency, already probed
     return _trim(planned, target)
