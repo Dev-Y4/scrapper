@@ -68,6 +68,7 @@ def pages_for(total: int) -> List[int]:
 
 def plan_views(probe: Callable[[View], Optional[int]], *,
                languages: List[Dict[str, Any]],
+               topics: Optional[List[str]] = None,
                target: Optional[int] = None,
                max_probes: Optional[int] = None) -> List[PlannedView]:
     """Expand one company into filter views worth fetching.
@@ -118,6 +119,7 @@ def plan_views(probe: Callable[[View], Optional[int]], *,
 
     planned: List[PlannedView] = []
     for lang in ranked:
+        cells: List[PlannedView] = []
         for star in sorted(star_totals):
             estimate = int(lang["count"] * star_share[star])
             if estimate < MIN_VIEW_ESTIMATE:
@@ -126,12 +128,30 @@ def plan_views(probe: Callable[[View], Optional[int]], *,
             # One extra page absorbs a low estimate; an overshoot ends on an
             # empty page and costs one wasted fetch.
             pages = pages_for(min(estimate + PER_PAGE, VIEW_CAP))
-            planned.append(PlannedView(view, pages, estimate))
-        if target is not None and sum(p.expected for p in planned) >= target:
+            cells.append(PlannedView(view, pages, estimate))
+
+        planned.extend(cells)
+        # languages x stars tops out at 5 x 200 = 1000 per language. Topic
+        # slices reach past that ceiling; measured novelty was ~65% new rows
+        # per topic view, so they earn their fetches where dates did not.
+        if topics and _short_of(planned, target):
+            for cell in cells:
+                if cell.expected < VIEW_CAP:
+                    continue    # a cell under the cap has nothing left to split
+                for topic in topics:
+                    planned.append(PlannedView(cell.view.with_("topics", topic),
+                                               pages_for(VIEW_CAP), VIEW_CAP))
+        if not _short_of(planned, target):
             break
 
     planned.extend(star_views)   # cross-language recency, already probed
     return _trim(planned, target)
+
+
+def _short_of(plans: List[PlannedView], target: Optional[int]) -> bool:
+    if target is None:
+        return True
+    return sum(plan.expected for plan in plans) < target
 
 
 def _trim(plans: List[PlannedView], target: Optional[int]) -> List[PlannedView]:

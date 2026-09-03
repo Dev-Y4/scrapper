@@ -67,3 +67,14 @@ def test_consumer_name_is_parsed_but_lives_only_on_the_object():
     first = parser.parse_reviews(props(), domain="www.trademax.se", source_view="v",
                                  fetcher="chrome", fetched_at="t")[0]
     assert first.consumer_name == "Ada L"
+
+
+def test_parse_topics_from_the_page():
+    """Topic ids come from the page, never a hand-written list — the same rule
+    as languages, for the same reason: a wrong value silently returns nothing
+    (topics=delivery gave 0) or the unfiltered set."""
+    assert parser.parse_topics(props()) == ["product", "delivery_service", "quality"]
+
+
+def test_parse_topics_when_absent():
+    assert parser.parse_topics({"reviews": []}) == []

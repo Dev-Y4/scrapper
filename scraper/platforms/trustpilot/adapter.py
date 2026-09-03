@@ -51,6 +51,7 @@ class TrustpilotAdapter:
         counts: Counter = Counter()
         page_one_cache: Dict[str, str] = {}
         languages: List[Dict[str, object]] = []
+        topics: List[str] = []
 
         def probe(view: View) -> Optional[int]:
             """Fetch page 1 of a view for its totalCount. The HTML is cached so
@@ -66,10 +67,12 @@ class TrustpilotAdapter:
                 return None
             if not languages:
                 languages.extend(parser.parse_languages(props))
+            if not topics:
+                topics.extend(parser.parse_topics(props))
             pagination = parser.parse_pagination(props)
             return pagination["total"] if pagination else None
 
-        planned = plan_views(probe, languages=languages, target=target)
+        planned = plan_views(probe, languages=languages, topics=topics, target=target)
         counts["views_planned"] = len(planned)
 
         seen = set()

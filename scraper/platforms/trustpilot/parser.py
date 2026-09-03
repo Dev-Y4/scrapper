@@ -48,6 +48,14 @@ def parse_languages(props: Dict[str, Any]) -> List[Dict[str, Any]]:
     return languages
 
 
+def parse_topics(props: Dict[str, Any]) -> List[str]:
+    """Topic filter ids offered for THIS company. Enumerated, never guessed: an
+    invented id returns zero results (`topics=delivery` gave 0, the real id is
+    `delivery_service`), which looks identical to a company having no reviews."""
+    topics = (props or {}).get("topicSummaryLocalizedTopics") or []
+    return [topic.get("id") for topic in topics if topic.get("id")]
+
+
 def _date(value: Optional[str]) -> str:
     return (value or "")[:10]
 

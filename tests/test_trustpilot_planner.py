@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import collections
+
 from scraper.platforms.trustpilot.planner import (
     MAX_PAGES, VIEW_CAP, PlannedView, View, pages_for, plan_views,
 )
@@ -150,3 +152,51 @@ def test_small_language_gets_fewer_pages_than_a_dominant_one():
     plans = {plan.view.label(): plan
              for plan in plan_views(probe, languages=LANGUAGES, target=100000)}
     assert len(plans["languages=da,stars=5"].pages) < len(plans["languages=sv,stars=5"].pages)
+
+
+TOPICS = ["product", "delivery_service", "quality", "order", "customer_service"]
+
+
+def test_topics_extend_reach_beyond_the_language_star_ceiling():
+    """languages x stars caps at 5 x 200 = 1000 per language, which cannot
+    reach a 3000-review target. Topic slices lift that ceiling."""
+    probe, _ = probe_from(BIG)
+    without = plan_views(probe, languages=LANGUAGES, target=3000)
+    probe2, _ = probe_from(BIG)
+    with_topics = plan_views(probe2, languages=LANGUAGES, topics=TOPICS, target=3000)
+
+    planned_rows = sum(len(plan.pages) * 20 for plan in with_topics)
+    assert planned_rows >= 3000, planned_rows
+    assert planned_rows > sum(len(plan.pages) * 20 for plan in without)
+
+
+def test_topic_views_carry_the_language_and_star_of_their_cell():
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=3000)
+    topic_plans = [p for p in plans if p.view.has("topics")]
+    assert topic_plans
+    for plan in topic_plans:
+        assert plan.view.get("languages")
+        assert plan.view.get("stars")
+        assert plan.view.get("topics") in TOPICS
+
+
+def test_star_balance_survives_the_topic_dimension():
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=3000)
+    sv_stars = collections.Counter(
+        plan.view.get("stars") for plan in plans if plan.view.get("languages") == "sv")
+    assert set(sv_stars) == {"1", "2", "3", "4", "5"}
+    assert max(sv_stars.values()) - min(sv_stars.values()) <= 1
+
+
+def test_topics_are_not_used_when_the_target_is_already_reachable():
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=400)
+    assert not any(plan.view.has("topics") for plan in plans)
+
+
+def test_planning_with_topics_still_costs_six_probes():
+    probe, calls = probe_from(BIG)
+    plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=3000)
+    assert len(calls) == 6
