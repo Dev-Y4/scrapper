@@ -1,4 +1,4 @@
-# Trustpilot Review Collection — Design
+# Multi-Platform Review Collection — Design
 
 Date: 2026-09-04
 Status: approved, pending implementation plan
@@ -13,12 +13,16 @@ The consumer is a customer-intelligence workflow: an agency compares an SMB
 client against many competitors, so breadth across companies matters more than
 exhaustive depth on any one of them.
 
+Two platforms, both rated and both universal across a competitor set:
+**Trustpilot** and **Google Maps**.
+
 ### Non-goals (this spec)
 
 - LLM enrichment of `journey_stage` / `review_type` / `customer_order_status`.
   Columns are reserved and left blank; enrichment is a separate spec.
-- Platforms other than Trustpilot. The fetcher/parser seam exists so Reddit,
-  Google Reviews, G2 etc. are additive, but none are built here.
+- Platforms beyond Trustpilot and Google Maps. Reddit, Facebook and Instagram
+  are **dropped on purpose**: they carry no star rating, and rating is the anchor
+  for competitor comparison. Company-website reviews are dropped too — see §9.
 - Any paid unblocker, proxy, or API subscription. Free path only. Paid options
   are pitched to the company only after this works.
 - Scheduling/automation. Runs are launched by hand, one company at a time.
@@ -62,6 +66,52 @@ Established by probe on 2026-09-04 against `www.trademax.se`, not assumed:
    keyless.** Intermittent: first attempt hit the WAF interstitial, retry
    succeeded. Usable as an independent fallback path.
 
+### 2.1 Google Maps findings
+
+Probed 2026-09-04 against the Trademax Möbler Stockholm listing:
+
+| Property | Measured |
+|---|---|
+| Coverage | **348 of 348 — complete. No login gate at any depth** |
+| Rate | ~385 reviews/min (348 in 54s of scrolling) |
+| Rating | present on 348/348 |
+| Review text | 202/348 — the rest are rating-only, normal for Google |
+| Owner reply | 24/348 |
+| Date | **relative strings only** — "8 months ago", "Edited a year ago" |
+
+Google is the stronger source for SMB competitor sets: complete coverage, faster,
+and a star on every row. Trustpilot's advantage is exact timestamps.
+
+Multi-location chains list each showroom as its own place with its own reviews,
+so a chain multiplies yield. Not yet measured.
+
+### 2.2 Trustpilot filter dimensions
+
+`filters.selected` exposes: `languages`, `date`, `stars`, `topics`, `search`,
+`locationId`, `sort`, `verified`, `replies`.
+
+`filters.reviewStatistics.reviewLanguages` lists **every valid language code with
+its review count**, so the planner enumerates languages rather than guessing them.
+This matters: an unrecognised code silently falls back to `all`. Probing `nb`
+(not a valid code here; Norwegian is `no`) returned `all`'s 66,724 verbatim. A
+planner that guessed codes would duplicate work and over-report coverage.
+
+Measured yield for `www.trademax.se` (59 languages; `sv` 64,871, `en` 1,177,
+`no` 276, `da` 154, long tail after):
+
+| Strategy | Reachable | Requests |
+|---|---|---|
+| baseline only (current build) | 182 | ~10 + 182 reply fetches |
+| stars only | ~710 | ~40 |
+| languages only (200/lang) | ~1,000 | ~60 |
+| **languages x stars** | **~2,676** | ~70 |
+| + date buckets on capped views | **3,000+** | ~150 |
+
+So ~3,000 from a single large company is achievable. **It is not achievable from a
+small one** — a company with 500 total reviews yields 500 however it is sliced.
+The 3,000-per-run target is met across the competitor set, not per company, and
+the run summary must report per-company yield honestly.
+
 ## 3. Decisions and rationale
 
 | Decision | Rationale |
@@ -69,26 +119,40 @@ Established by probe on 2026-09-04 against `www.trademax.se`, not assumed:
 | No Trustpilot account credentials, ever | Login is not required to read reviews. Automating an authenticated session converts a per-IP, expiring block into an account ban on a real person, and moves a contested-but-common practice into unambiguous ToS breach. Rotate IPs, not identities. |
 | Google Sheet is the store; no SQLite | Keeps the system one artifact. Dedup and resume both work by reading the tab's existing `review_id` column. |
 | `consumer_name` collected but **off by default** | Reviewer names are personal data under GDPR and most Trustpilot reviewers are EU residents. Analysis doesn't need it; easier to add later than to unpick from client sheets. Config flag. |
+| Reddit / Facebook / Instagram dropped | No star rating, and rating anchors the comparison. Meta additionally offers no lawful free path. |
+| Company-website reviews dropped | Present for only a minority of companies, so they add holes rather than columns to a bulk comparison, and on-site testimonials are curated by the company — the least representative input available. |
+| Both platforms share one tab per company | Comparison work wants a company's whole voice in one place; the `platform` column filters trivially. |
+| Language codes enumerated, never guessed | Invalid codes silently return `all`. |
 | Planner is pure logic, no network | The cap/overlap/nesting rules are the likeliest source of subtle bugs. Testable offline with fabricated counts. |
 | Fetcher returns HTML, not parsed data | One parser for all fetchers; swapping fetchers cannot change parsed output. |
 
 ## 4. Architecture
 
 ```
-target list (domains)
+target list (company -> trustpilot domain + google place)
    ↓
-view planner      pure logic: expands a domain into filter views, plans pages
-   ↓
-fetcher           [ chrome-cdp | jina ]   swappable, failover
-   ↓
-parser            [ trustpilot __NEXT_DATA__ ]   swappable per platform
+platform adapter   [ trustpilot | google-maps ]
+   ├─ plan   pure logic: what to fetch
+   ├─ fetch  [ chrome-cdp | jina ]   swappable, failover
+   └─ parse  platform-specific -> normalized row
    ↓
 dedup by (platform, review_id)
    ↓
-normalized rows
-   ↓
-sheet writer      tab per company, batched appends
+sheet writer       ONE tab per company, both platforms mixed, batched appends
 ```
+
+**Adapter contract** — every platform implements the same four calls:
+
+```
+plan(target, budget)   -> [unit]      what to fetch, ordered by expected new rows
+fetch(unit)            -> raw         via the shared fetcher layer
+parse(raw)             -> [row]       normalized schema
+classify(raw)          -> outcome     OK | TRANSIENT_BLOCK | GATED | EMPTY
+```
+
+Trustpilot's filter-slicing lives inside *its* adapter, not in core. Google's
+adapter plans differently — scroll rounds against a place, not filter views — and
+core neither knows nor cares.
 
 Each unit is independently testable: the planner with fake counts, the parser
 with a saved HTML fixture, the sheet writer against a scratch tab, the fetchers
@@ -109,13 +173,23 @@ plan(view):
 Split dimensions in priority order:
 
 1. `stars` 1–5 — disjoint, no wasted overlap. Always first.
-2. `languages` — disjoint. The large lever for non-English companies.
+2. `languages` — disjoint, and the largest lever for non-English companies.
+   Codes are **enumerated from `filters.reviewStatistics.reviewLanguages`** with
+   their counts, never guessed.
 3. `date` buckets (last30days / 3mo / 6mo / 12mo) — these **nest** rather than
    partition, so later resort.
 4. `sort=recency` vs default — same filter, different 200-window, partial
    overlap. Last resort.
 
-Hard rule: never plan a page number above 10 for any view.
+Hard rules:
+
+- Never plan a page number above 10 for any view.
+- **Invalid-split guard:** if a child view's `totalCount` equals its parent's, the
+  filter value was not recognised and silently fell back. Discard the view. This
+  is what stops the `nb`-returns-`all` trap from duplicating work and inflating
+  reported coverage.
+- Per-language counts are known before fetching, so expected yield is computed up
+  front and the cheapest views are planned first.
 
 The planner is target-aware. The caller passes a review target (e.g. 3,000) or
 "everything reachable"; views are ordered by expected-new-per-request and
@@ -134,6 +208,26 @@ coverage is impossible. The result is a **stratified sample deliberately spread
 across star ratings**, which is more useful for competitor sentiment comparison
 than 200 consecutive recent reviews. This limitation is reported to the caller,
 not hidden.
+
+### 4.1b Google Maps adapter
+
+No filter slicing: reviews load completely, so the plan is one unit per place.
+
+- Resolve target -> place via Maps search, click through to `/maps/place/`.
+- Open the Reviews pane, sort by **Newest** where the control is available.
+- Scroll the review container until unique-id count stops growing for 5 rounds.
+- Extract per `[data-review-id]` card: rating (from the star `aria-label`), text,
+  relative date, owner reply. **Dedup by review id during extraction** — each
+  review contributes several `[data-review-id]` nodes, so raw node counts
+  overstate by ~3.8x (1,320 nodes for 348 reviews in the probe).
+
+Known rough edges, to handle in implementation:
+- The sort control's accessible name is locale-dependent; the probe's selector
+  failed. Needs a locale-robust selector, with sort treated as optional.
+- Relative dates are converted to an absolute date **bracketed between
+  neighbouring reviews** once sorted by Newest. Month-level accuracy, not day.
+  Every Google row carries `date_precision = relative`.
+- Multi-location companies: one unit per place, aggregated under the company.
 
 ### 4.2 Fetchers
 
@@ -172,15 +266,17 @@ One flat row per review. Sheet column order:
 
 | Column | Source |
 |---|---|
-| `review_id` | `id` — dedup key |
-| `platform` | literal `Trustpilot` |
+| `review_id` | platform-namespaced (`trustpilot:<id>` / `google:<id>`) — dedup key |
+| `platform` | `Trustpilot` or `Google` |
 | `company_domain` | run input |
-| `company_name` | `businessUnit.displayName` |
+| `company_name` | `businessUnit.displayName` / Maps place name |
+| `location` | Google: which place produced the row. Blank for Trustpilot |
 | `url` | `https://www.trustpilot.com/reviews/{id}` |
 | `rating` | `rating` |
 | `title` | `title` |
 | `raw_text` | `text` |
-| `review_date` | `dates.publishedDate` |
+| `review_date` | Trustpilot: `dates.publishedDate`. Google: bracketed from relative label |
+| `date_precision` | `exact` (Trustpilot) or `relative` (Google) |
 | `experience_date` | `dates.experiencedDate` |
 | `language` | `language` |
 | `country` | `location` |
@@ -188,7 +284,7 @@ One flat row per review. Sheet column order:
 | `review_source` | `labels.verification.reviewSourceName` |
 | `support_reply` | `reply.message` |
 | `support_reply_date` | `reply.publishedDate` |
-| `source_view` | planner: which view produced this row |
+| `source_view` | Trustpilot: which filter view. Google: which place/scroll unit |
 | `fetched_at` | run timestamp |
 | `fetcher` | `chrome` or `jina` |
 | `customer_order_status` | blank — enrichment |
@@ -196,11 +292,15 @@ One flat row per review. Sheet column order:
 | `review_type` | blank — enrichment |
 
 `consumer_name` is parsed but **not written** unless `INCLUDE_CONSUMER_NAME=true`.
+This applies to both platforms.
+
+`date_precision` exists so nobody silently treats a Google date as a Trustpilot
+one. Any time-series analysis must respect it.
 
 ### 4.5 Sheet as store
 
-- Tab per company, created with headers on first run (extends existing
-  `setup_sheet.py`).
+- **One tab per company, both platforms mixed**, created with headers on first
+  run (extends existing `setup_sheet.py`). The `platform` column separates them.
 - **Dedup across runs:** read the tab's existing `review_id` column once per run;
   skip ids already present; append only new rows.
 - **Resume:** same mechanism. A run that dies mid-way is re-run and continues.
@@ -250,6 +350,9 @@ ignored.
 | classifier | one fixture per outcome, asserting `GATED` never routes to retry or failover |
 | dedup | overlapping view outputs collapse to unique ids |
 | sheet writer | scratch tab: header creation, batched append, existing-id read-back |
+| planner guard | a child view echoing its parent's totalCount is discarded |
+| google extractor | saved DOM fixture: node-level duplicates collapse to unique reviews; ratings parsed from aria-labels |
+| date bracketing | ordered relative labels -> bounded absolute dates, `date_precision=relative` |
 | fetchers | live smoke tests, run on demand, not in the default suite |
 
 ## 8. Legal and ethical position
@@ -266,13 +369,6 @@ ignored.
 ## 9. Future work
 
 - LLM enrichment of the three blank columns.
-- Additional platforms behind the same seam. Order by feasibility, not by the
-  wish list: **Reddit** (official API, commercial tier applies) and
-  **Google Reviews** (Places API returns ~5 reviews per place, so depth needs a
-  vendor such as SerpApi / Outscraper / Apify) are tractable.
-  **Facebook and Instagram are not** — Graph API only covers pages you manage and
-  Meta actively litigates scraping. That should be said to the company before it
-  is promised to a client.
 - Discovery step: Tavily / DDGS to build competitor target lists. Right tool for
   finding review-page URLs, wrong tool for extracting review bodies.
 - Paid unblocker as a third fetcher, if the company funds it. Note it raises
