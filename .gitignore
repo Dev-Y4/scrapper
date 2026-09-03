@@ -1,0 +1,13 @@
+.venv/
+_pycache_/
+*.pyc
+.env
+out/
+*.db
+sa.json
+*.json.key
+.DS_Store
+token.json
+client_secret*.json
+venv/
+scrapper.json
