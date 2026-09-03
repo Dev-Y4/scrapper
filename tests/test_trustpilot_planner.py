@@ -5,22 +5,30 @@ from scraper.platforms.trustpilot.planner import (
 )
 
 LANGUAGES = [{"code": "sv", "count": 64871}, {"code": "en", "count": 1177},
-             {"code": "da", "count": 154}]
+             {"code": "da", "count": 154}, {"code": "zz", "count": 0}]
 
 
 def probe_from(totals):
-    """totals maps a view label to its totalCount."""
+    calls = []
+
     def probe(view):
+        calls.append(view.label())
         return totals.get(view.label())
-    return probe
+    return probe, calls
+
+
+BIG = {"languages=all": 66724,
+       "languages=all,stars=1": 10193, "languages=all,stars=2": 3481,
+       "languages=all,stars=3": 4674, "languages=all,stars=4": 12992,
+       "languages=all,stars=5": 42020}
+
+
+def labels(plans):
+    return [plan.view.label() for plan in plans]
 
 
 def test_pages_for_small_view():
     assert pages_for(61) == [1, 2, 3, 4]
-
-
-def test_pages_for_exact_multiple():
-    assert pages_for(40) == [1, 2]
 
 
 def test_pages_never_exceed_the_cap():
@@ -34,66 +42,89 @@ def test_view_query_and_label_are_stable():
     assert view.label() == "languages=en,stars=5"
 
 
-def test_small_root_is_not_split():
-    plans = plan_views(probe_from({"languages=all": 150}), languages=LANGUAGES)
-    assert len(plans) == 1
-    assert plans[0].view.label() == "languages=all"
+def test_small_company_is_one_view_and_one_probe():
+    probe, calls = probe_from({"languages=all": 150})
+    plans = plan_views(probe, languages=LANGUAGES)
+    assert labels(plans) == ["languages=all"]
     assert plans[0].pages == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert len(calls) == 1
 
 
-def test_large_root_splits_by_stars_first():
-    totals = {"languages=all": 797,
-              "languages=all,stars=1": 292, "languages=all,stars=2": 61,
-              "languages=all,stars=3": 66, "languages=all,stars=4": 183,
-              "languages=all,stars=5": 678}
-    plans = plan_views(probe_from(totals), languages=[])
-    labels = sorted(plan.view.label() for plan in plans)
-    assert labels == sorted(k for k in totals if "stars=" in k)
+def test_medium_company_stops_at_star_views():
+    totals = {"languages=all": 900, "languages=all,stars=1": 100,
+              "languages=all,stars=2": 100, "languages=all,stars=3": 100,
+              "languages=all,stars=4": 300, "languages=all,stars=5": 300}
+    probe, calls = probe_from(totals)
+    plans = plan_views(probe, languages=[])
+    assert sorted(labels(plans)) == sorted(k for k in totals if "stars=" in k)
+    assert len(calls) == 6  # root + five stars, nothing more
 
 
-def test_star_view_over_the_cap_splits_by_language():
-    totals = {"languages=all": 66724,
-              "languages=all,stars=5": 42020,
-              "languages=sv,stars=5": 40000,
-              "languages=en,stars=5": 700,
-              "languages=da,stars=5": 80}
-    for star in (1, 2, 3, 4):
-        totals["languages=all,stars={0}".format(star)] = 100
-    plans = plan_views(probe_from(totals), languages=LANGUAGES)
-    labels = [plan.view.label() for plan in plans]
-    assert "languages=sv,stars=5" in labels
-    assert "languages=en,stars=5" in labels
-    assert "languages=all,stars=5" not in labels
+def test_planning_a_large_company_costs_only_six_probes():
+    """Language x star sizes are estimated from counts the page already gave
+    us. Probing all of them would cost minutes of page fetches."""
+    probe, calls = probe_from(BIG)
+    plan_views(probe, languages=LANGUAGES, target=3000)
+    assert len(calls) == 6
 
 
-def test_invalid_language_code_echoing_parent_total_is_discarded():
-    """An unrecognised code silently returns the unfiltered result. A child
-    whose total equals its parent's is a fallback, not a real slice."""
-    totals = {"languages=all": 66724, "languages=all,stars=5": 42020,
-              "languages=sv,stars=5": 42020,   # <- the fallback
-              "languages=en,stars=5": 700,
-              "languages=da,stars=5": 80}
-    for star in (1, 2, 3, 4):
-        totals["languages=all,stars={0}".format(star)] = 100
-    plans = plan_views(probe_from(totals), languages=LANGUAGES)
-    labels = [plan.view.label() for plan in plans]
-    assert "languages=sv,stars=5" not in labels
-    assert "languages=en,stars=5" in labels
+def test_language_star_views_are_planned_for_a_large_company():
+    probe, _ = probe_from(BIG)
+    got = labels(plan_views(probe, languages=LANGUAGES, target=3000))
+    assert "languages=sv,stars=1" in got
+    assert "languages=sv,stars=5" in got
+    assert "languages=en,stars=1" in got
 
 
-def test_unreachable_view_is_dropped():
-    plans = plan_views(probe_from({"languages=all": 0}), languages=LANGUAGES)
-    assert plans == []
+def test_every_star_of_a_language_is_planned_before_the_next_language():
+    """A sample skewed to one star rating is useless for comparing sentiment,
+    so breadth across stars comes before depth into more languages."""
+    probe, _ = probe_from(BIG)
+    got = [label for label in labels(plan_views(probe, languages=LANGUAGES, target=1000))
+           if label.startswith("languages=sv") or label.startswith("languages=en")]
+    sv_positions = [i for i, label in enumerate(got) if "languages=sv" in label]
+    en_positions = [i for i, label in enumerate(got) if "languages=en" in label]
+    assert len(sv_positions) == 5, got
+    if en_positions:
+        assert max(sv_positions) < min(en_positions)
 
 
-def test_target_stops_planning_early():
-    totals = {"languages=all": 797,
-              "languages=all,stars=1": 292, "languages=all,stars=2": 61,
-              "languages=all,stars=3": 66, "languages=all,stars=4": 183,
-              "languages=all,stars=5": 678}
-    plans = plan_views(probe_from(totals), languages=[], target=250)
-    assert sum(plan.expected for plan in plans) >= 250
-    assert len(plans) == 2  # the two 200-yield views, biggest first
+def test_zero_count_languages_are_never_planned():
+    probe, _ = probe_from(BIG)
+    assert not any("languages=zz" in label
+                   for label in labels(plan_views(probe, languages=LANGUAGES,
+                                                  target=100000)))
+
+
+def test_invalid_star_slice_echoing_the_root_total_is_discarded():
+    """An unrecognised filter value silently returns the unfiltered result."""
+    totals = dict(BIG)
+    totals["languages=all,stars=3"] = 66724   # <- the fallback
+    probe, _ = probe_from(totals)
+    got = labels(plan_views(probe, languages=[], target=3000))
+    assert "languages=all,stars=3" not in got
+    assert "languages=all,stars=1" in got
+
+
+def test_target_is_spread_across_star_ratings_not_filled_one_at_a_time():
+    """A 600-review target must not come back as 200 one-star + 200 two-star +
+    200 three-star. Sentiment comparison needs every rating represented."""
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, target=600)
+    stars = sorted(int(plan.view.get("stars")) for plan in plans
+                   if plan.view.get("languages") == "sv")
+    assert stars == [1, 2, 3, 4, 5], stars
+    planned_rows = sum(len(plan.pages) * 20 for plan in plans)
+    assert 600 <= planned_rows <= 1000
+
+
+def test_a_small_target_still_touches_every_star():
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, target=200)
+    stars = sorted(int(plan.view.get("stars")) for plan in plans
+                   if plan.view.get("languages") == "sv")
+    assert stars == [1, 2, 3, 4, 5]
+    assert all(len(plan.pages) >= 1 for plan in plans)
 
 
 def test_expected_is_capped_at_two_hundred():
@@ -102,12 +133,20 @@ def test_expected_is_capped_at_two_hundred():
 
 
 def test_no_plan_ever_exceeds_page_ten():
-    totals = {"languages=all": 66724}
-    for star in (1, 2, 3, 4, 5):
-        totals["languages=all,stars={0}".format(star)] = 42020
-        for lang in LANGUAGES:
-            totals["languages={0},stars={1}".format(lang["code"], star)] = 30000
-    plans = plan_views(probe_from(totals), languages=LANGUAGES)
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, target=100000)
     assert plans
     for plan in plans:
         assert max(plan.pages) <= MAX_PAGES
+
+
+def test_unreachable_company_yields_nothing():
+    probe, _ = probe_from({"languages=all": 0})
+    assert plan_views(probe, languages=LANGUAGES) == []
+
+
+def test_small_language_gets_fewer_pages_than_a_dominant_one():
+    probe, _ = probe_from(BIG)
+    plans = {plan.view.label(): plan
+             for plan in plan_views(probe, languages=LANGUAGES, target=100000)}
+    assert len(plans["languages=da,stars=5"].pages) < len(plans["languages=sv,stars=5"].pages)

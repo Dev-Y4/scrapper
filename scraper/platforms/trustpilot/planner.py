@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 PER_PAGE = 20
 MAX_PAGES = 10                    # page 11 is a login redirect. Hard cap.
 VIEW_CAP = PER_PAGE * MAX_PAGES   # 200 reviews reachable per view
-MAX_DEPTH = 3                     # stars -> languages -> date
-DATE_BUCKETS = ("last30days", "last3months", "last6months", "last12months")
 STARS = (1, 2, 3, 4, 5)
+MIN_VIEW_ESTIMATE = 20            # below one page, a view is not worth a fetch
+
+# `date` (last30days / last3months / ...) is a further dimension, but the
+# buckets NEST, so slicing by them re-fetches the same reviews. Measured on a
+# real run: 391 duplicates for 211 unique rows. Left unused unless yield ever
+# demands it. `topics`, `search` and `locationId` are the other untapped levers.
 
 
 @dataclass(frozen=True)
@@ -61,67 +66,100 @@ def pages_for(total: int) -> List[int]:
     return list(range(1, count + 1))
 
 
-def _children(view: View, languages: List[Dict[str, Any]]) -> List[View]:
-    if not view.has("stars"):
-        return [view.with_("stars", star) for star in STARS]
-    if languages and view.get("languages") == "all":
-        return [view.with_("languages", lang["code"]) for lang in languages]
-    if not view.has("date"):
-        return [view.with_("date", bucket) for bucket in DATE_BUCKETS]
-    return []
-
-
-def _expand(view: View, total: int, probe: Callable[[View], Optional[int]],
-            languages: List[Dict[str, Any]], out: List[PlannedView],
-            depth: int) -> None:
-    if total <= 0:
-        return
-    if total <= VIEW_CAP or depth >= MAX_DEPTH:
-        out.append(PlannedView(view, pages_for(total), total))
-        return
-
-    children = _children(view, languages)
-    if not children:
-        out.append(PlannedView(view, pages_for(total), total))
-        return
-
-    kept = 0
-    for child in children:
-        child_total = probe(child)
-        if not child_total:
-            continue
-        if child_total == total:
-            # The filter value was not recognised and silently fell back to the
-            # parent's result set. Not a real slice.
-            continue
-        kept += 1
-        _expand(child, child_total, probe, languages, out, depth + 1)
-
-    if kept == 0:
-        out.append(PlannedView(view, pages_for(total), total))
-
-
 def plan_views(probe: Callable[[View], Optional[int]], *,
                languages: List[Dict[str, Any]],
-               target: Optional[int] = None) -> List[PlannedView]:
-    """Expand one company into filter views worth fetching, richest first."""
+               target: Optional[int] = None,
+               max_probes: Optional[int] = None) -> List[PlannedView]:
+    """Expand one company into filter views worth fetching.
+
+    Planning itself costs page fetches, so it probes only what it cannot infer:
+    the root and the five star slices. Language x star sizes are *estimated*
+    from the per-language counts the page already reported, which keeps planning
+    at six round-trips instead of hundreds. An estimate that runs long simply
+    ends on an empty page; one that runs short costs a little yield.
+
+    Views are ordered for a stratified sample — every star rating of a language
+    before moving to the next language — because a set skewed to one rating is
+    useless for comparing sentiment across competitors."""
     root = View.of(languages="all")
     root_total = probe(root)
     if not root_total:
         return []
 
-    planned: List[PlannedView] = []
-    _expand(root, root_total, probe, languages, planned, depth=0)
-    planned.sort(key=lambda plan: -plan.expected)
+    if root_total <= VIEW_CAP:
+        return [PlannedView(root, pages_for(root_total), root_total)]
 
+    # -- probe the five star slices (the only disjoint dimension we can trust)
+    star_totals: Dict[int, int] = {}
+    for star in STARS:
+        star_view = root.with_("stars", star)
+        total = probe(star_view)
+        if not total:
+            continue
+        if total == root_total:
+            # Unrecognised filter value: silently returned the unfiltered set.
+            continue
+        star_totals[star] = total
+
+    if not star_totals:
+        return [PlannedView(root, pages_for(root_total), root_total)]
+
+    star_views = [PlannedView(root.with_("stars", star), pages_for(total), total)
+                  for star, total in sorted(star_totals.items())]
+
+    # If every star slice fits under the cap, language slicing adds nothing.
+    if all(plan.total <= VIEW_CAP for plan in star_views):
+        return _trim(star_views, target)
+
+    # -- estimate language x star from counts the page already gave us
+    ranked = sorted((lang for lang in languages if lang.get("count")),
+                    key=lambda lang: -lang["count"])
+    star_share = {star: total / float(root_total) for star, total in star_totals.items()}
+
+    planned: List[PlannedView] = []
+    for lang in ranked:
+        for star in sorted(star_totals):
+            estimate = int(lang["count"] * star_share[star])
+            if estimate < MIN_VIEW_ESTIMATE:
+                continue
+            view = View.of(languages=lang["code"]).with_("stars", star)
+            # One extra page absorbs a low estimate; an overshoot ends on an
+            # empty page and costs one wasted fetch.
+            pages = pages_for(min(estimate + PER_PAGE, VIEW_CAP))
+            planned.append(PlannedView(view, pages, estimate))
+        if target is not None and sum(p.expected for p in planned) >= target:
+            break
+
+    planned.extend(star_views)   # cross-language recency, already probed
+    return _trim(planned, target)
+
+
+def _trim(plans: List[PlannedView], target: Optional[int]) -> List[PlannedView]:
+    """Spend the target ACROSS a language's star slices, not down them.
+
+    Filling view by view would return a 600-review target as 200 one-star plus
+    200 two-star plus 200 three-star, and a competitor comparison built on that
+    reads far more negative than the company actually is."""
     if target is None:
-        return planned
+        return plans
+
+    groups: "OrderedDict[str, List[PlannedView]]" = OrderedDict()
+    for plan in plans:
+        groups.setdefault(plan.view.get("languages") or "", []).append(plan)
 
     chosen: List[PlannedView] = []
-    running = 0
-    for plan in planned:
-        if running >= target:
+    remaining = target
+    for group in groups.values():
+        if remaining <= 0:
             break
-        chosen.append(plan)
-        running += plan.expected
+        share = int(math.ceil(remaining / float(len(group))))
+        for plan in group:
+            if remaining <= 0:
+                break
+            take = min(plan.expected, max(share, PER_PAGE))
+            pages = pages_for(take)
+            if not pages:
+                continue
+            chosen.append(PlannedView(plan.view, pages, plan.total))
+            remaining -= len(pages) * PER_PAGE
     return chosen
