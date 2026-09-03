@@ -111,3 +111,44 @@ def test_google_only_run_needs_no_trustpilot_domain(tmp_path, monkeypatch):
     assert run.main(["--company", "T", "--google", "T Stockholm", "--dry-run",
                      "--output", str(tmp_path / "o.json"),
                      "--checkpoint-dir", str(tmp_path)]) == 0
+
+
+def test_one_chrome_is_shared_by_both_platforms(tmp_path, monkeypatch):
+    """Playwright's sync API cannot be started twice in a process. Closing the
+    Trustpilot pool and then launching a second Chrome for Google raises
+    'Sync API inside the asyncio loop', so both platforms share one browser."""
+    built = []
+
+    class CountingChrome:
+        name = "chrome"
+
+        def __init__(self, *a, **k):
+            built.append(1)
+
+        def close(self):
+            return None
+
+    class FakeTrustpilot:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, domain, target=None, on_view=None):
+            return run.CollectResult(reviews=[], stats={})
+
+    class FakeGoogle:
+        def __init__(self, chrome, *a, **k):
+            self.chrome = chrome
+
+        def collect(self, query, company_name, max_scrolls=80):
+            assert isinstance(self.chrome, CountingChrome)
+            return run.CollectResult(reviews=[], stats={})
+
+    monkeypatch.setattr(run, "ChromeCDPFetcher", CountingChrome)
+    monkeypatch.setattr(run, "TrustpilotAdapter", FakeTrustpilot)
+    monkeypatch.setattr(run, "GoogleMapsAdapter", FakeGoogle)
+
+    run.main(["--company", "T", "--trustpilot", "d.com", "--google", "T Sthlm",
+              "--dry-run", "--output", str(tmp_path / "o.json"),
+              "--checkpoint-dir", str(tmp_path)])
+
+    assert len(built) == 1, "expected exactly one Chrome, got {0}".format(len(built))

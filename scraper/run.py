@@ -20,9 +20,9 @@ from scraper.sheets import (append_reviews, existing_review_ids,
                             get_or_create_tab, open_spreadsheet)
 
 
-def build_pool(headless: bool = False) -> FetcherPool:
+def build_pool(chrome=None, headless: bool = False) -> FetcherPool:
     """Chrome first (unlimited, free), Jina as the independent fallback."""
-    return FetcherPool([ChromeCDPFetcher(headless=headless), JinaFetcher()])
+    return FetcherPool([chrome or ChromeCDPFetcher(headless=headless), JinaFetcher()])
 
 
 def _safe_slug(text: str) -> str:
@@ -58,14 +58,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     checkpoint = Checkpoint(os.path.join(
         args.checkpoint_dir, "{0}.json".format(_safe_slug(args.company))))
 
+    # One Chrome for the whole run. Playwright's sync API cannot be started a
+    # second time in the same process, so a per-platform browser would fail the
+    # moment the first one closed.
+    chrome = ChromeCDPFetcher(headless=args.headless)
     pool = None
-    chrome = None
     reviews: List[Review] = []
     stats: Dict[str, int] = {}
 
     try:
         if args.trustpilot:
-            pool = build_pool(headless=args.headless)
+            pool = build_pool(chrome=chrome, headless=args.headless)
             result: CollectResult = TrustpilotAdapter(pool).collect(
                 args.trustpilot, target=args.target,
                 on_view=lambda label, rows: checkpoint.extend(rows))
@@ -73,16 +76,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             stats.update(result.stats)
 
         if args.google:
-            chrome = ChromeCDPFetcher(headless=args.headless)
             google_result = GoogleMapsAdapter(chrome).collect(args.google, args.company)
             reviews.extend(google_result.reviews)
             checkpoint.extend(google_result.reviews)
             for key, value in google_result.stats.items():
                 stats["google_{0}".format(key)] = value
     finally:
+        # Closing the pool closes Chrome too, so never close both.
         if pool is not None:
             pool.close()
-        if chrome is not None and hasattr(chrome, "close"):
+        elif hasattr(chrome, "close"):
             chrome.close()
 
     if args.dry_run:
