@@ -118,8 +118,11 @@ def plan_views(probe: Callable[[View], Optional[int]], *,
     star_share = {star: total / float(root_total) for star, total in star_totals.items()}
 
     planned: List[PlannedView] = []
+    at_cap: List[PlannedView] = []
+
+    # Pass 1 — languages x stars. A review has exactly one language, so these
+    # slices are disjoint and every row they return is new.
     for lang in ranked:
-        cells: List[PlannedView] = []
         for star in sorted(star_totals):
             estimate = int(lang["count"] * star_share[star])
             if estimate < MIN_VIEW_ESTIMATE:
@@ -128,21 +131,24 @@ def plan_views(probe: Callable[[View], Optional[int]], *,
             # One extra page absorbs a low estimate; an overshoot ends on an
             # empty page and costs one wasted fetch.
             pages = pages_for(min(estimate + PER_PAGE, VIEW_CAP))
-            cells.append(PlannedView(view, pages, estimate))
+            cell = PlannedView(view, pages, estimate)
+            planned.append(cell)
+            if cell.expected >= VIEW_CAP:
+                at_cap.append(cell)
 
-        planned.extend(cells)
-        # languages x stars tops out at 5 x 200 = 1000 per language. Topic
-        # slices reach past that ceiling; measured novelty was ~65% new rows
-        # per topic view, so they earn their fetches where dates did not.
-        if topics and _short_of(planned, target):
-            for cell in cells:
-                if cell.expected < VIEW_CAP:
-                    continue    # a cell under the cap has nothing left to split
-                for topic in topics:
-                    planned.append(PlannedView(cell.view.with_("topics", topic),
-                                               pages_for(VIEW_CAP), VIEW_CAP))
-        if not _short_of(planned, target):
-            break
+    # Pass 2 — topics, only to top up. They overlap heavily (one review mentions
+    # several topics), so spending the plan on them before exhausting languages
+    # trades disjoint rows for duplicates: measured at 1737 unique against 3366
+    # duplicates when topics came first.
+    if topics and _short_of(planned, target):
+        # One topic across every star before the next topic, so the sample
+        # stays balanced across ratings however early the target is reached.
+        for topic in topics:
+            for cell in at_cap:
+                planned.append(PlannedView(cell.view.with_("topics", topic),
+                                           pages_for(VIEW_CAP), VIEW_CAP))
+            if not _short_of(planned, target):
+                break
 
     planned.extend(star_views)   # cross-language recency, already probed
     return _trim(planned, target)
@@ -163,9 +169,13 @@ def _trim(plans: List[PlannedView], target: Optional[int]) -> List[PlannedView]:
     if target is None:
         return plans
 
+    # Base language slices form their own group per language, and topic slices
+    # another, so the disjoint ones are funded before the overlapping ones.
     groups: "OrderedDict[str, List[PlannedView]]" = OrderedDict()
     for plan in plans:
-        groups.setdefault(plan.view.get("languages") or "", []).append(plan)
+        key = "{0}|{1}".format(plan.view.get("languages") or "",
+                               "topic" if plan.view.has("topics") else "base")
+        groups.setdefault(key, []).append(plan)
 
     chosen: List[PlannedView] = []
     remaining = target

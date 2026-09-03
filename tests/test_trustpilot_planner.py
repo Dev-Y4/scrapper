@@ -200,3 +200,25 @@ def test_planning_with_topics_still_costs_six_probes():
     probe, calls = probe_from(BIG)
     plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=3000)
     assert len(calls) == 6
+
+
+def test_all_languages_are_planned_before_any_topic_slice():
+    """Languages are disjoint — a review has exactly one — so every language x
+    star row is new. Topic slices overlap heavily (one review mentions several).
+    Spending the plan on topics first cost 436 unique rows and 3366 duplicates
+    on a real run, so disjoint dimensions come first."""
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=5400)
+    first_topic = next((i for i, p in enumerate(plans) if p.view.has("topics")), None)
+    assert first_topic is not None, "topics should still be planned"
+    languages_before = {p.view.get("languages") for p in plans[:first_topic]}
+    assert {"sv", "en", "da"} <= languages_before, languages_before
+
+
+def test_topics_only_top_up_after_languages_are_exhausted():
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=5400)
+    base = [p for p in plans if not p.view.has("topics")]
+    topic = [p for p in plans if p.view.has("topics")]
+    assert base and topic
+    assert plans.index(base[-1]) < plans.index(topic[0])
