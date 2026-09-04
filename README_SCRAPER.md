@@ -19,6 +19,20 @@ The service account in `scrapper.json` must have Editor access on the sheet.
 
 ## Run
 
+Just run it and it asks:
+
+    ./.venv/bin/python -m scraper.run
+
+    Which company do you want reviews for?
+
+      Company name (becomes the sheet tab): Gymshark
+      Trustpilot domain (e.g. www.trademax.se, blank to skip): www.gymshark.com
+      Google Maps search (e.g. "Trademax Stockholm", blank to skip):
+      How many reviews? [3000]:
+
+Leave either platform blank to skip it. Flags skip the questions entirely,
+which is what you want for scripting a whole competitor set:
+
     ./.venv/bin/python -m scraper.run \
         --company "Trademax" \
         --trustpilot www.trademax.se \
@@ -52,6 +66,10 @@ skewed to one rating makes competitor sentiment comparison useless.
   the WAF; a Playwright- or Selenium-launched browser gets walled.
 - **First page of a run gets challenged.** The profile at `~/.trustpilot-chrome`
   keeps the clearance cookie afterwards.
+- **A small target collects a bit more than you asked.** A language's five
+  star slices are funded as a set, so a 60-review ask returns 100 (20 per
+  rating). Balance beats exactness: a part-funded set would return only 1- and
+  2-star reviews.
 - **`transient_chrome` in the summary.** A page was refused and retried
   successfully. Only a `demoted_*` line means a fetcher gave up for the run.
 

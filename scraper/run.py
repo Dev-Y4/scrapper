@@ -25,6 +25,33 @@ def build_pool(chrome=None, headless: bool = False) -> FetcherPool:
     return FetcherPool([chrome or ChromeCDPFetcher(headless=headless), JinaFetcher()])
 
 
+def _ask(prompt: str) -> str:
+    return input(prompt)
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+def _fill_in_by_asking(args) -> None:
+    """Run bare and it asks. Flags win, so scripted runs over a whole
+    competitor set never stop to prompt."""
+    print("\nWhich company do you want reviews for?\n")
+    if not args.company:
+        args.company = _ask("  Company name (becomes the sheet tab): ").strip()
+    args.trustpilot = _ask(
+        "  Trustpilot domain (e.g. www.trademax.se, blank to skip): ").strip()
+    args.google = _ask(
+        '  Google Maps search (e.g. "Trademax Stockholm", blank to skip): ').strip()
+    answer = _ask("  How many reviews? [{0}]: ".format(args.target)).strip()
+    if answer:
+        try:
+            args.target = int(answer)
+        except ValueError:
+            print("  not a number — keeping {0}".format(args.target))
+    print("")
+
+
 def _safe_slug(text: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in text)[:60]
 
@@ -33,7 +60,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scraper.run",
         description="Collect rated reviews into one Google Sheet tab per company.")
-    parser.add_argument("--company", required=True, help="Sheet tab name")
+    parser.add_argument("--company", help="Sheet tab name")
     parser.add_argument("--trustpilot", help="Trustpilot domain, e.g. www.trademax.se")
     parser.add_argument("--google", help='Google Maps search query, e.g. "Trademax Stockholm"')
     parser.add_argument("--target", type=int, default=3000,
@@ -50,9 +77,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     load_dotenv()
     args = _parser().parse_args(argv)
 
+    if not args.trustpilot and not args.google and _interactive():
+        _fill_in_by_asking(args)
+
     if not args.trustpilot and not args.google:
         sys.stderr.write(
             "error: at least one of --trustpilot or --google must be given\n")
+        return 2
+    if not args.company:
+        sys.stderr.write("error: --company is required\n")
         return 2
 
     checkpoint = Checkpoint(os.path.join(

@@ -152,3 +152,88 @@ def test_one_chrome_is_shared_by_both_platforms(tmp_path, monkeypatch):
               "--checkpoint-dir", str(tmp_path)])
 
     assert len(built) == 1, "expected exactly one Chrome, got {0}".format(len(built))
+
+
+def test_running_bare_asks_which_company(tmp_path, monkeypatch):
+    """Run with no flags, it should ask — the original script did, and that is
+    how a person actually uses this."""
+    asked = []
+    answers = iter(["Gymshark", "www.gymshark.com", "", "250"])
+
+    class FakeTrustpilot:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, domain, target=None, on_view=None):
+            assert domain == "www.gymshark.com"
+            assert target == 250
+            return run.CollectResult(
+                reviews=[Review(review_id="trustpilot:a", platform="Trustpilot")],
+                stats={})
+
+    def fake_ask(prompt):
+        asked.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr(run, "TrustpilotAdapter", FakeTrustpilot)
+    monkeypatch.setattr(run, "build_pool", lambda **kwargs: _NullPool())
+    monkeypatch.setattr(run, "ChromeCDPFetcher", lambda **kwargs: _NullChrome())
+    monkeypatch.setattr(run, "_ask", fake_ask)
+    monkeypatch.setattr(run, "_interactive", lambda: True)
+
+    code = run.main(["--dry-run", "--output", str(tmp_path / "o.json"),
+                     "--checkpoint-dir", str(tmp_path)])
+
+    assert code == 0
+    assert any("company" in p.lower() for p in asked)
+    assert any("trustpilot" in p.lower() for p in asked)
+
+
+def test_flags_skip_the_questions(tmp_path, monkeypatch):
+    def boom(prompt):
+        raise AssertionError("should not prompt when flags are given")
+
+    class FakeTrustpilot:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, domain, target=None, on_view=None):
+            return run.CollectResult(reviews=[], stats={})
+
+    monkeypatch.setattr(run, "TrustpilotAdapter", FakeTrustpilot)
+    monkeypatch.setattr(run, "build_pool", lambda **kwargs: _NullPool())
+    monkeypatch.setattr(run, "ChromeCDPFetcher", lambda **kwargs: _NullChrome())
+    monkeypatch.setattr(run, "_ask", boom)
+    monkeypatch.setattr(run, "_interactive", lambda: True)
+
+    assert run.main(["--company", "X", "--trustpilot", "d.com", "--dry-run",
+                     "--output", str(tmp_path / "o.json"),
+                     "--checkpoint-dir", str(tmp_path)]) == 0
+
+
+def test_non_interactive_with_no_flags_errors_instead_of_hanging(monkeypatch, capsys):
+    """A cron job or a piped run must fail loudly, never block on a prompt."""
+    monkeypatch.setattr(run, "_interactive", lambda: False)
+    assert run.main([]) == 2
+    assert "at least one of --trustpilot" in capsys.readouterr().err.lower()
+
+
+def test_blank_answer_skips_that_platform(tmp_path, monkeypatch):
+    answers = iter(["Acme", "", "Acme Stockholm", ""])
+
+    class FakeGoogle:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, query, company_name, max_scrolls=80):
+            assert query == "Acme Stockholm"
+            return run.CollectResult(reviews=[], stats={})
+
+    monkeypatch.setattr(run, "GoogleMapsAdapter", FakeGoogle)
+    monkeypatch.setattr(run, "build_pool", lambda **kwargs: _NullPool())
+    monkeypatch.setattr(run, "ChromeCDPFetcher", lambda **kwargs: _NullChrome())
+    monkeypatch.setattr(run, "_ask", lambda prompt: next(answers))
+    monkeypatch.setattr(run, "_interactive", lambda: True)
+
+    assert run.main(["--dry-run", "--output", str(tmp_path / "o.json"),
+                     "--checkpoint-dir", str(tmp_path)]) == 0
