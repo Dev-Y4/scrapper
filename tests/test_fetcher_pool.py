@@ -106,3 +106,93 @@ def test_close_closes_every_fetcher():
     backup = ScriptedFetcher("jina", [GOOD])
     pool_of(primary, backup).close()
     assert primary.closed and backup.closed
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def test_a_demoted_fetcher_returns_after_the_cooldown():
+    """A rough patch must not kill a fetcher for the rest of a long run. A
+    3000-review run lost both fetchers to transient blocks and stopped early
+    at 2753 with plan left unspent."""
+    clock = FakeClock()
+    primary = ScriptedFetcher("chrome", [BLOCKED, BLOCKED, BLOCKED])
+    backup = ScriptedFetcher("jina", [GOOD] * 10)
+    pool = FetcherPool([primary, backup], max_retries=0, failure_threshold=3,
+                       sleep=lambda s: None, clock=clock, cooldown=120.0)
+
+    for _ in range(3):
+        pool.fetch("https://x")
+    assert pool.stats()["demoted_chrome"] == 1
+
+    calls_when_demoted = primary.calls
+    pool.fetch("https://x")
+    assert primary.calls == calls_when_demoted, "still demoted before cooldown"
+
+    clock.advance(121)
+    primary.responses = [GOOD]
+    result = pool.fetch("https://x")
+    assert primary.calls > calls_when_demoted, "should be retried after cooldown"
+    assert result.fetcher == "chrome"
+
+
+def test_recovery_resets_the_failure_streak():
+    clock = FakeClock()
+    primary = ScriptedFetcher("chrome", [BLOCKED, BLOCKED, BLOCKED])
+    pool = FetcherPool([primary, ScriptedFetcher("jina", [GOOD] * 10)],
+                       max_retries=0, failure_threshold=3, sleep=lambda s: None,
+                       clock=clock, cooldown=60.0)
+    for _ in range(3):
+        pool.fetch("https://x")
+    clock.advance(61)
+    primary.responses = [GOOD]
+    pool.fetch("https://x")
+    clock.advance(1)
+    primary.responses = [GOOD]
+    assert pool.fetch("https://x").fetcher == "chrome"
+
+
+def test_every_fetcher_cooling_down_is_reported_not_silent():
+    clock = FakeClock()
+    pool = FetcherPool([ScriptedFetcher("chrome", [BLOCKED] * 9),
+                        ScriptedFetcher("jina", [BLOCKED] * 9)],
+                       max_retries=0, failure_threshold=3, sleep=lambda s: None,
+                       clock=clock, cooldown=60.0)
+    for _ in range(6):
+        pool.fetch("https://x")
+    result = pool.fetch("https://x")
+    assert result.outcome is Outcome.TRANSIENT_BLOCK
+    assert pool.stats()["all_fetchers_cooling"] >= 1
+
+
+def test_all_cooling_waits_for_the_soonest_recovery_instead_of_burning_the_plan():
+    """Returning instantly while everything is cooling makes the adapter chew
+    through every remaining view in seconds and end the run with nothing."""
+    clock = FakeClock()
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock.advance(seconds)
+
+    primary = ScriptedFetcher("chrome", [BLOCKED] * 3)
+    backup = ScriptedFetcher("jina", [BLOCKED] * 3)
+    pool = FetcherPool([primary, backup], max_retries=0, failure_threshold=3,
+                       sleep=sleep, clock=clock, cooldown=60.0)
+    for _ in range(3):
+        pool.fetch("https://x")
+
+    primary.responses = [GOOD]
+    backup.responses = [GOOD]
+    result = pool.fetch("https://x")
+
+    assert any(s >= 1 for s in slept), "expected a wait, got {0}".format(slept)
+    assert result.outcome is Outcome.OK
