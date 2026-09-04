@@ -216,9 +216,36 @@ def test_all_languages_are_planned_before_any_topic_slice():
 
 
 def test_topics_only_top_up_after_languages_are_exhausted():
+    """Order of preference: disjoint language slices, then topic slices, and
+    the languages=all recency views last — those are supersets of the language
+    slices, so they are the most redundant rows in the plan."""
     probe, _ = probe_from(BIG)
     plans = plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=5400)
-    base = [p for p in plans if not p.view.has("topics")]
+    per_language = [p for p in plans
+                    if not p.view.has("topics") and p.view.get("languages") != "all"]
     topic = [p for p in plans if p.view.has("topics")]
-    assert base and topic
-    assert plans.index(base[-1]) < plans.index(topic[0])
+    catch_all = [p for p in plans if p.view.get("languages") == "all"]
+    assert per_language and topic and catch_all
+    assert plans.index(per_language[-1]) < plans.index(topic[0])
+    assert plans.index(topic[-1]) < plans.index(catch_all[0])
+
+
+def test_a_small_target_is_spread_over_stars_not_spent_on_two_of_them():
+    """An English-dominant company with target=100 planned 3 pages per star
+    view (300 rows) and the harvest stopped after two stars. Base views are
+    funded from the target itself so a small ask stays balanced and cheap."""
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=100)
+    base = [p for p in plans if not p.view.has("topics")]
+    assert len(base) >= 5
+    planned_rows = sum(len(p.pages) * 20 for p in base[:5])
+    assert planned_rows <= 200, planned_rows
+
+
+def test_topic_budget_is_separate_from_the_base_budget():
+    probe, _ = probe_from(BIG)
+    plans = plan_views(probe, languages=LANGUAGES, topics=TOPICS, target=3000)
+    base_rows = sum(len(p.pages) * 20 for p in plans if not p.view.has("topics"))
+    topic_rows = sum(len(p.pages) * 20 for p in plans if p.view.has("topics"))
+    assert base_rows >= 2000, base_rows
+    assert topic_rows > 0

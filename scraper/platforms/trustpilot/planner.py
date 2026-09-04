@@ -70,6 +70,7 @@ def plan_views(probe: Callable[[View], Optional[int]], *,
                languages: List[Dict[str, Any]],
                topics: Optional[List[str]] = None,
                target: Optional[int] = None,
+               topic_budget: Optional[int] = None,
                max_probes: Optional[int] = None) -> List[PlannedView]:
     """Expand one company into filter views worth fetching.
 
@@ -110,7 +111,7 @@ def plan_views(probe: Callable[[View], Optional[int]], *,
 
     # If every star slice fits under the cap, language slicing adds nothing.
     if all(plan.total <= VIEW_CAP for plan in star_views):
-        return _trim(star_views, target)
+        return _trim(star_views, target, topic_budget)
 
     # -- estimate language x star from counts the page already gave us
     ranked = sorted((lang for lang in languages if lang.get("count")),
@@ -153,7 +154,7 @@ def plan_views(probe: Callable[[View], Optional[int]], *,
         # ends the moment the true target is met, so surplus plans cost nothing.
 
     planned.extend(star_views)   # cross-language recency, already probed
-    return _trim(planned, target)
+    return _trim(planned, target, topic_budget)
 
 
 def _short_of(plans: List[PlannedView], target: Optional[int]) -> bool:
@@ -162,7 +163,8 @@ def _short_of(plans: List[PlannedView], target: Optional[int]) -> bool:
     return sum(plan.expected for plan in plans) < target
 
 
-def _trim(plans: List[PlannedView], target: Optional[int]) -> List[PlannedView]:
+def _trim(plans: List[PlannedView], target: Optional[int],
+          topic_budget: Optional[int] = None) -> List[PlannedView]:
     """Spend the target ACROSS a language's star slices, not down them.
 
     Filling view by view would return a 600-review target as 200 one-star plus
@@ -179,19 +181,28 @@ def _trim(plans: List[PlannedView], target: Optional[int]) -> List[PlannedView]:
                                "topic" if plan.view.has("topics") else "base")
         groups.setdefault(key, []).append(plan)
 
+    # Two budgets. Base slices are funded from the target itself, so a small
+    # ask stays small AND balanced; topic slices draw on a separate surplus,
+    # because reaching N unique rows through overlapping views needs more than
+    # N fetched rows.
+    budgets = {"base": target,
+               "topic": target if topic_budget is None else topic_budget}
+
     chosen: List[PlannedView] = []
-    remaining = target
-    for group in groups.values():
-        if remaining <= 0:
-            break
-        share = int(math.ceil(remaining / float(len(group))))
+    for key, group in groups.items():
+        kind = "topic" if key.endswith("|topic") else "base"
+        if budgets[kind] <= 0:
+            continue
+        share = int(math.ceil(budgets[kind] / float(len(group))))
+        # A group is funded as a SET, never partially. One page is the smallest
+        # unit that can be fetched, so a budget below one page per star would
+        # otherwise buy the first two ratings and drop the rest — which is how
+        # a 100-review target came back as nothing but 1- and 2-star reviews.
         for plan in group:
-            if remaining <= 0:
-                break
             take = min(plan.expected, max(share, PER_PAGE))
             pages = pages_for(take)
             if not pages:
                 continue
             chosen.append(PlannedView(plan.view, pages, plan.total))
-            remaining -= len(pages) * PER_PAGE
+            budgets[kind] -= len(pages) * PER_PAGE
     return chosen

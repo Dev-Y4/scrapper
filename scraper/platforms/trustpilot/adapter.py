@@ -92,15 +92,18 @@ class TrustpilotAdapter:
             richest = max(languages, key=lambda lang: lang.get("count") or 0)
             probe(View.of(languages=richest["code"]))
 
-        headroom = int(target * OVERLAP_HEADROOM) if target else None
+        # Base slices are funded from the target itself; topic slices draw on a
+        # separate surplus, since overlapping views need more fetched rows than
+        # the unique count asked for.
+        topic_budget = int(target * (OVERLAP_HEADROOM - 1)) if target else None
         planned = plan_views(probe, languages=languages, topics=topics,
-                             target=headroom)
+                             target=target, topic_budget=topic_budget)
         counts["views_planned"] = len(planned)
 
         seen = set()
         reviews: List[Review] = []
 
-        for plan in planned:
+        for index, plan in enumerate(planned):
             label = plan.view.label()
             view_reviews: List[Review] = []
             for page in plan.pages:
@@ -139,8 +142,16 @@ class TrustpilotAdapter:
             if on_view is not None:
                 on_view(label, view_reviews)
 
+            # Stop only once the target is met AND every base slice has been
+            # visited. The planner balances the sample across star ratings, and
+            # stopping mid-plan threw that away: a 100-review target on an
+            # English company came back with nothing but 1- and 2-star reviews.
             if target is not None and len(reviews) >= target:
-                break
+                remaining_base = [p for p in planned[index + 1:]
+                                  if not p.view.has("topics")
+                                  and p.view.get("languages") != "all"]
+                if not remaining_base:
+                    break
 
         counts["unique_reviews"] = len(reviews)
         counts.update(self.pool.stats())

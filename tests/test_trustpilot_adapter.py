@@ -140,3 +140,51 @@ def test_each_view_is_probed_at_most_once():
     adapter_with(fetcher).collect("www.trademax.se", target=50)
     root = [url for url in fetcher.urls if url.endswith("?languages=all")]
     assert len(root) == 1, root
+
+
+def page_with(total, ids, topics=True):
+    """A Trustpilot page carrying a chosen totalCount and review ids."""
+    reviews = ",".join(
+        '{{"id":"{0}","rating":5,"title":"t","text":"body","language":"en",'
+        '"location":"GB","consumer":{{"displayName":"X"}},'
+        '"dates":{{"experiencedDate":"2026-01-01T00:00:00.000Z",'
+        '"publishedDate":"2026-01-02T00:00:00.000Z"}},"reply":null,'
+        '"labels":{{"verification":{{"isVerified":true,"reviewSourceName":"Organic"}}}}}}'.format(i)
+        for i in ids)
+    topic_block = ('"topicSummaryLocalizedTopics":[{"id":"product","displayName":"P"}],'
+                   if topics else "")
+    return ('<html><body><script id="__NEXT_DATA__" type="application/json">'
+            '{{"props":{{"pageProps":{{{topics}'
+            '"businessUnit":{{"displayName":"Acme"}},'
+            '"filters":{{"pagination":{{"currentPage":1,"perPage":20,'
+            '"totalCount":{total},"totalPages":{pages}}},'
+            '"reviewStatistics":{{"reviewLanguages":['
+            '{{"isoCode":"all","reviewCount":50000,"displayName":"all"}},'
+            '{{"isoCode":"en","reviewCount":40000,"displayName":"English"}}]}}}},'
+            '"reviews":[{reviews}]}}}}}}</script></body></html>').format(
+                topics=topic_block, total=total, pages=max(1, total // 20),
+                reviews=reviews)
+
+
+def test_harvest_visits_every_base_view_even_after_the_target_is_met():
+    """The planner balances the sample across star ratings; stopping the moment
+    the count is reached threw that away. A target of 100 on an English company
+    returned only 1-star and 2-star reviews."""
+    counter = {"n": 0}
+
+    def responder(url):
+        # Distinct ids per request so every view yields new rows.
+        counter["n"] += 1
+        base = counter["n"] * 1000
+        total = 50000 if "stars=" not in url else 5000
+        return page_with(total, ["r{0}".format(base + i) for i in range(20)])
+
+    fetcher = RecordingFetcher(responder=responder)
+    result = adapter_with(fetcher).collect("acme.com", target=40)
+
+    # Only harvest URLs count — the five languages=all probes are planning.
+    stars = {url.split("stars=")[1].split("&")[0]
+             for url in fetcher.urls
+             if "stars=" in url and "languages=en" in url and "topics=" not in url}
+    assert stars >= {"1", "2", "3", "4", "5"}, stars
+    assert result.stats["unique_reviews"] >= 40
