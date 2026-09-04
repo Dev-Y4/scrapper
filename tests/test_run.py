@@ -237,3 +237,94 @@ def test_blank_answer_skips_that_platform(tmp_path, monkeypatch):
 
     assert run.main(["--dry-run", "--output", str(tmp_path / "o.json"),
                      "--checkpoint-dir", str(tmp_path)]) == 0
+
+
+def test_one_platform_crashing_does_not_lose_the_other_platforms_rows(tmp_path, monkeypatch, capsys):
+    """A crashed Chrome renderer during the Google phase threw away 3001
+    already-collected Trustpilot reviews. Platforms must fail independently."""
+    output = tmp_path / "out.json"
+
+    class FakeTrustpilot:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, domain, target=None, on_view=None):
+            return run.CollectResult(
+                reviews=[Review(review_id="trustpilot:a", platform="Trustpilot")],
+                stats={"unique_reviews": 1})
+
+    class CrashingGoogle:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, query, company_name, max_scrolls=80):
+            raise RuntimeError("Page.goto: Page crashed")
+
+    monkeypatch.setattr(run, "TrustpilotAdapter", FakeTrustpilot)
+    monkeypatch.setattr(run, "GoogleMapsAdapter", CrashingGoogle)
+    monkeypatch.setattr(run, "build_pool", lambda **kwargs: _NullPool())
+    monkeypatch.setattr(run, "ChromeCDPFetcher", lambda **kwargs: _NullChrome())
+
+    code = run.main(["--company", "T", "--trustpilot", "d.com", "--google", "q",
+                     "--dry-run", "--output", str(output),
+                     "--checkpoint-dir", str(tmp_path)])
+
+    assert code == 0
+    rows = json.loads(output.read_text())
+    assert [r["review_id"] for r in rows] == ["trustpilot:a"]
+    assert "google" in capsys.readouterr().out.lower()
+
+
+def test_a_crashed_run_resumes_from_its_checkpoint(tmp_path, monkeypatch):
+    """The checkpoint was written but never read back, so a crash still lost
+    everything it was meant to protect."""
+    checkpoint_dir = tmp_path / "cp"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "Acme.json").write_text(json.dumps([
+        {"review_id": "trustpilot:old", "platform": "Trustpilot", "rating": 4,
+         "company_name": "Acme"}]), encoding="utf-8")
+
+    class FakeTrustpilot:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, domain, target=None, on_view=None):
+            return run.CollectResult(
+                reviews=[Review(review_id="trustpilot:new", platform="Trustpilot")],
+                stats={})
+
+    monkeypatch.setattr(run, "TrustpilotAdapter", FakeTrustpilot)
+    monkeypatch.setattr(run, "build_pool", lambda **kwargs: _NullPool())
+    monkeypatch.setattr(run, "ChromeCDPFetcher", lambda **kwargs: _NullChrome())
+
+    output = tmp_path / "out.json"
+    run.main(["--company", "Acme", "--trustpilot", "d.com", "--dry-run",
+              "--output", str(output), "--checkpoint-dir", str(checkpoint_dir)])
+
+    ids = {r["review_id"] for r in json.loads(output.read_text())}
+    assert ids == {"trustpilot:old", "trustpilot:new"}
+
+
+def test_resume_does_not_duplicate_rows_already_in_the_checkpoint(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "cp"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "Acme.json").write_text(json.dumps([
+        {"review_id": "trustpilot:a", "platform": "Trustpilot"}]), encoding="utf-8")
+
+    class FakeTrustpilot:
+        def __init__(self, *a, **k):
+            pass
+
+        def collect(self, domain, target=None, on_view=None):
+            return run.CollectResult(
+                reviews=[Review(review_id="trustpilot:a", platform="Trustpilot")],
+                stats={})
+
+    monkeypatch.setattr(run, "TrustpilotAdapter", FakeTrustpilot)
+    monkeypatch.setattr(run, "build_pool", lambda **kwargs: _NullPool())
+    monkeypatch.setattr(run, "ChromeCDPFetcher", lambda **kwargs: _NullChrome())
+
+    output = tmp_path / "out.json"
+    run.main(["--company", "Acme", "--trustpilot", "d.com", "--dry-run",
+              "--output", str(output), "--checkpoint-dir", str(checkpoint_dir)])
+    assert len(json.loads(output.read_text())) == 1

@@ -14,6 +14,10 @@ DEFAULT_PROFILE = str(Path.home() / ".trustpilot-chrome")
 DEFAULT_PORT = 9333
 
 
+def _is_crash(error: Exception) -> bool:
+    return "crash" in str(error).lower()
+
+
 class ChromeCDPFetcher(Fetcher):
     """Real Chrome, attached over CDP. The profile persists the WAF clearance
     cookie, so the challenge is paid once, not once per run."""
@@ -84,17 +88,37 @@ class ChromeCDPFetcher(Fetcher):
         (scroll, click) use this instead of fetch()."""
         return self._ensure_page()
 
+    def restart_page(self):
+        """Drop a dead renderer and open a fresh one. A long run accumulates
+        hundreds of navigations in one tab and the renderer eventually crashes;
+        that should cost a page, not the run."""
+        try:
+            if self._page is not None:
+                self._page.close()
+        except Exception:
+            pass
+        self._page = None
+        return self._ensure_page()
+
     # -- fetching --------------------------------------------------------
     def fetch(self, url: str) -> str:
         page = self._ensure_page()
         try:
             page.goto(url, wait_until="domcontentloaded")
-            html = page.content()
-        except Exception:
-            return ""
+            return page.content()
+        except Exception as error:
+            if not _is_crash(error):
+                return ""
         finally:
             self._sleep(self._rng(*self.delay_range))
-        return html
+
+        # The renderer died. Rebuild once and try again before giving up.
+        try:
+            page = self.restart_page()
+            page.goto(url, wait_until="domcontentloaded")
+            return page.content()
+        except Exception:
+            return ""
 
     def close(self) -> None:
         for closer in (lambda: self._browser and self._browser.close(),

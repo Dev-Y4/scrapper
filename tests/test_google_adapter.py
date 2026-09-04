@@ -118,3 +118,36 @@ def test_live_google_collection():
         assert all(r.rating for r in result.reviews[:20])
     finally:
         chrome.close()
+
+
+def test_a_crashed_page_is_rebuilt_before_giving_up():
+    """The Google phase died on 'Page.goto: Page crashed' after a long
+    Trustpilot run had exhausted the renderer."""
+    good = FakePage([[node("a")], [], [], [], []])
+    rebuilt = {"n": 0}
+
+    class CrashOnce:
+        name = "chrome"
+
+        def __init__(self):
+            self.calls = 0
+
+        def page(self):
+            self.calls += 1
+            if self.calls == 1:
+                class Dead(FakePage):
+                    def goto(self, url, wait_until=None):
+                        raise RuntimeError("Page.goto: Page crashed")
+                return Dead([])
+            return good
+
+        def restart_page(self):
+            rebuilt["n"] += 1
+            return good
+
+    chrome = CrashOnce()
+    adapter = GoogleMapsAdapter(chrome, now=lambda: "t",
+                                today=lambda: date(2026, 9, 4), sleep=lambda s: None)
+    result = adapter.collect("Anthropologie NYC", "Anthropologie")
+    assert rebuilt["n"] == 1
+    assert [r.review_id for r in result.reviews] == ["google:a"]

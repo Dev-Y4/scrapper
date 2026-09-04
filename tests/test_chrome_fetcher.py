@@ -62,3 +62,43 @@ def test_live_fetch_of_a_trustpilot_page():
         assert outcome is Outcome.OK
     finally:
         fetcher.close()
+
+
+def test_a_crashed_page_is_replaced_rather_than_being_fatal():
+    """After ~300 navigations the renderer crashed and killed the whole run.
+    A dead page is replaced on the next request."""
+    fetcher = ChromeCDPFetcher(sleep=lambda s: None, rng=lambda a, b: 0.0)
+    rebuilt = {"n": 0}
+
+    class Dead(FakePage):
+        def goto(self, url, wait_until=None):
+            raise RuntimeError("Page.goto: Page crashed")
+
+    def fake_ensure():
+        rebuilt["n"] += 1
+        page = FakePage("<html>fresh</html>") if rebuilt["n"] > 1 else Dead("")
+        fetcher._page = page
+        return page
+
+    fetcher._ensure_page = fake_ensure
+    assert fetcher.fetch("https://example.com") == "<html>fresh</html>"
+    assert rebuilt["n"] == 2, "expected one rebuild after the crash"
+
+
+def test_a_normal_navigation_failure_still_returns_empty_without_rebuilding():
+    fetcher = ChromeCDPFetcher(sleep=lambda s: None, rng=lambda a, b: 0.0)
+    calls = {"n": 0}
+
+    class Timeout(FakePage):
+        def goto(self, url, wait_until=None):
+            raise RuntimeError("Timeout 45000ms exceeded")
+
+    def fake_ensure():
+        calls["n"] += 1
+        page = Timeout("")
+        fetcher._page = page
+        return page
+
+    fetcher._ensure_page = fake_ensure
+    assert fetcher.fetch("https://example.com") == ""
+    assert calls["n"] == 1

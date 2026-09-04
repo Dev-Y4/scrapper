@@ -99,21 +99,51 @@ def main(argv: Optional[List[str]] = None) -> int:
     reviews: List[Review] = []
     stats: Dict[str, int] = {}
 
+    # Resume: rows already fetched by a run that died are on disk. Without this
+    # the checkpoint protects nothing — a crashed Google phase once threw away
+    # 3001 collected Trustpilot reviews.
+    for row in checkpoint.reviews():
+        known = set(Review.__dataclass_fields__)
+        reviews.append(Review(**{k: v for k, v in row.items() if k in known}))
+    if reviews:
+        stats["resumed_from_checkpoint"] = len(reviews)
+
+    seen = set(review.review_id for review in reviews)
+
+    def keep(new_rows):
+        added = 0
+        for review in new_rows:
+            if review.review_id in seen:
+                continue
+            seen.add(review.review_id)
+            reviews.append(review)
+            added += 1
+        return added
+
     try:
         if args.trustpilot:
             pool = build_pool(chrome=chrome, headless=args.headless)
-            result: CollectResult = TrustpilotAdapter(pool).collect(
-                args.trustpilot, target=args.target,
-                on_view=lambda label, rows: checkpoint.extend(rows))
-            reviews.extend(result.reviews)
-            stats.update(result.stats)
+            try:
+                result: CollectResult = TrustpilotAdapter(pool).collect(
+                    args.trustpilot, target=args.target,
+                    on_view=lambda label, rows: checkpoint.extend(rows))
+                keep(result.reviews)
+                stats.update(result.stats)
+            except Exception as error:   # noqa: BLE001 - one platform must not
+                stats["trustpilot_failed"] = 1   # take the other one down
+                print("  Trustpilot phase failed: {0}".format(error))
 
         if args.google:
-            google_result = GoogleMapsAdapter(chrome).collect(args.google, args.company)
-            reviews.extend(google_result.reviews)
-            checkpoint.extend(google_result.reviews)
-            for key, value in google_result.stats.items():
-                stats["google_{0}".format(key)] = value
+            try:
+                google_result = GoogleMapsAdapter(chrome).collect(args.google,
+                                                                  args.company)
+                keep(google_result.reviews)
+                checkpoint.extend(google_result.reviews)
+                for key, value in google_result.stats.items():
+                    stats["google_{0}".format(key)] = value
+            except Exception as error:   # noqa: BLE001
+                stats["google_failed"] = 1
+                print("  Google phase failed: {0}".format(error))
     finally:
         # Closing the pool closes Chrome too, so never close both.
         if pool is not None:

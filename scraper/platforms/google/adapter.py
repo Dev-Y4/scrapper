@@ -49,8 +49,18 @@ class GoogleMapsAdapter:
         counts: Counter = Counter()
         page = self.chrome.page()
 
-        page.goto(MAPS_SEARCH.format(query=query.replace(" ", "+")),
-                  wait_until="domcontentloaded")
+        url = MAPS_SEARCH.format(query=query.replace(" ", "+"))
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+        except Exception as error:
+            # A long Trustpilot run leaves the renderer exhausted; it dies on
+            # the first Maps navigation. Rebuild the page and try once more.
+            if "crash" not in str(error).lower() or not hasattr(self.chrome,
+                                                                "restart_page"):
+                raise
+            counts["page_rebuilt"] += 1
+            page = self.chrome.restart_page()
+            page.goto(url, wait_until="domcontentloaded")
         self._sleep(5)
 
         if "/maps/place/" not in getattr(page, "url", ""):
