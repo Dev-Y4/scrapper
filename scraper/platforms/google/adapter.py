@@ -70,10 +70,28 @@ class GoogleMapsAdapter:
             except Exception:
                 counts["place_click_failed"] += 1
 
-        if self._click_first(page, REVIEW_TAB_SELECTORS):
-            self._sleep(3)
+        def reviews_present():
+            try:
+                return bool(page.evaluate(EXTRACT_JS))
+            except Exception:
+                return False
+
+        def revert():
+            """Undo a click that emptied the pane by reloading the place."""
+            counts["reverted_after_click"] = 1
+            page.goto(page.url, wait_until="domcontentloaded")
+            self._sleep(4)
+
+        # Only open the Reviews tab if reviews are not already on screen. A
+        # search that lands straight on a place shows them, and clicking then
+        # navigated AWAY from them: 28 review nodes before the click, 0 after.
+        if not reviews_present():
+            if self._click_first(page, REVIEW_TAB_SELECTORS):
+                self._sleep(3)
+            else:
+                counts["reviews_tab_not_found"] += 1
         else:
-            counts["reviews_tab_not_found"] += 1
+            counts["reviews_already_visible"] = 1
 
         # Sorting by Newest makes date bracketing meaningful. The control's
         # accessible name is locale-dependent, so treat it as optional.
@@ -87,6 +105,11 @@ class GoogleMapsAdapter:
                 counts["sort_option_not_found"] += 1
         else:
             counts["sort_control_not_found"] += 1
+
+        # Sorting is a convenience; the reviews are the point. If the click
+        # emptied the pane, take the reviews unsorted rather than nothing.
+        if not reviews_present():
+            revert()
 
         nodes: List[dict] = []
         seen_ids = set()

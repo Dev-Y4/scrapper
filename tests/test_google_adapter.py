@@ -151,3 +151,36 @@ def test_a_crashed_page_is_rebuilt_before_giving_up():
     result = adapter.collect("Anthropologie NYC", "Anthropologie")
     assert rebuilt["n"] == 1
     assert [r.review_id for r in result.reviews] == ["google:a"]
+
+
+def test_a_ui_click_that_destroys_the_review_list_is_reverted():
+    """Clicking Google's sort control emptied the review pane on one layout:
+    reviews visible before, zero after. Any interaction that loses the reviews
+    must be undone by reloading the place."""
+    class VanishingPage(FakePage):
+        def __init__(self, batches):
+            FakePage.__init__(self, batches)
+            self.nodes = [node("a"), node("b")]
+            self.reloads = 0
+
+        def get_by_role(self, role):
+            return FakeLocator(self, "menuitemradio")
+
+        def goto(self, url, wait_until=None):
+            self.reloads += 1
+            self.url = url
+            self.nodes = [node("a"), node("b")]
+
+        def locator(self, selector):
+            page = self
+
+            class Killer(FakeLocator):
+                def click(self, timeout=None):
+                    page.clicks.append(selector)
+                    page.nodes = []      # the click wipes the pane
+            return Killer(self, selector)
+
+    page = VanishingPage([[], [], [], [], [], []])
+    result = adapter_for(page).collect("Anthropologie NYC", "Anthropologie")
+    assert page.reloads >= 2, "expected a reload after the pane was emptied"
+    assert result.stats.get("reverted_after_click")

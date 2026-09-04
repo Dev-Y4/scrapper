@@ -30,12 +30,20 @@ EXTRACT_JS = """() => {
   return out;
 }"""
 
+# Anchored to the reviews themselves, not to class names. Google's pane classes
+# differ by layout and locale: div.m6QErb is scrollable on some listings and
+# present-but-not-scrollable on others, which silently collected zero reviews.
 SCROLL_JS = """() => {
-  const panes = [...document.querySelectorAll('div.m6QErb')]
-    .filter(d => d.scrollHeight > d.clientHeight + 200);
-  const pane = panes[panes.length - 1];
-  if (!pane) return -1;
-  pane.scrollTop = pane.scrollHeight;
+  let el = document.querySelector('[data-review-id]');
+  while (el && !(el.scrollHeight > el.clientHeight + 200)) el = el.parentElement;
+  if (!el) {
+    const panes = [...document.querySelectorAll('div')]
+      .filter(d => d.scrollHeight > d.clientHeight + 200)
+      .sort((a, b) => b.scrollHeight - a.scrollHeight);
+    el = panes[0];
+  }
+  if (!el) return -1;
+  el.scrollTop = el.scrollHeight;
   return 1;
 }"""
 
